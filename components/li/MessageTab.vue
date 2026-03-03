@@ -3,7 +3,13 @@ import { computed } from 'vue';
 import type { Campaign, Prospect } from '@/lib/types';
 import ProspectRow from './ProspectRow.vue';
 
-const props = defineProps<{ campaign: Campaign; isRunning: boolean; sentToday: number }>();
+const props = defineProps<{
+  campaign: Campaign;
+  isRunning: boolean;
+  sentToday: number;
+  nextActionLabel?: string | null;
+  nextActionCountdown?: number | null;
+}>();
 const emit = defineEmits<{
   updateLimit: [value: number];
   updateNote: [value: string];
@@ -61,6 +67,9 @@ const sessionProspects = computed(() =>
 
     <button class="start" v-if="!isRunning" :disabled="!sessionProspects.length" @click="emit('start')">Start Campaign</button>
     <button class="stop" v-else @click="emit('stop')">Stop Campaign</button>
+    <p v-if="isRunning && nextActionLabel && nextActionCountdown !== null" class="countdown">
+      Next action in {{ nextActionCountdown }}s: {{ nextActionLabel }}
+    </p>
   </div>
 </template>
 
@@ -90,5 +99,14 @@ input, textarea {
 .start { background: #0a66c2; }
 .stop { background: #b42318; }
 .start:disabled { background: #93c5fd; cursor: not-allowed; }
+.countdown {
+  margin: 0;
+  font-size: 12px;
+  color: #1f2937;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px;
+}
 .empty { color: #6b7280; font-size: 12px; padding: 8px; margin: 0; }
 </style>

@@ -13,6 +13,8 @@ const props = defineProps<{
   activeCampaignId: string | null;
   isRunning: boolean;
   sentToday: number;
+  nextActionLabel: string | null;
+  nextActionCountdown: number | null;
   x: number;
   y: number;
 }>();
@@ -113,6 +115,8 @@ const activeCampaign = computed(() =>
         :campaign="activeCampaign"
         :is-running="isRunning"
         :sent-today="sentToday"
+        :next-action-label="nextActionLabel"
+        :next-action-countdown="nextActionCountdown"
         @update-limit="emit('updateDailyLimit', { campaignId: activeCampaign.id, value: $event })"
         @update-note="emit('updateConnectionNote', { campaignId: activeCampaign.id, value: $event })"
         @open="emit('openProspect', $event)"

@@ -1,82 +1,125 @@
-# LinkedIn Extension Implementation + Incremental Playwright Validation Plan
+# InTouch LinkedIn Automation Plan (Updated)
 
-## Summary
-Implement the extension in small, testable increments. After each feature increment, run Playwright MCP on LinkedIn and validate behavior on:
+## Product Goal
+Build a WXT Chrome extension (LinkedIn-only) that manages campaigns from CSV imports and runs controlled connection-request automation with 5–10 second randomized delays between actions.
 
-- `https://www.linkedin.com/in/wjayesh/`
+## Current Agreed Behavior
 
-Hard safety gate: do **not** click final `Send` on a connection request during intermediate tests. When all pre-send behavior is complete and validated, stop and request your explicit permission before executing the final send action.
+### UI Surface
+1. Extension is active only on `www.linkedin.com`.
+2. Main campaign panel is always rendered on page load (floating, draggable).
+3. Floating `LI` circle launcher has been removed.
+4. Panel drag uses title bar and should not block clicks on controls.
 
-## Delivery Sequence (Feature-by-Feature)
+### Campaigns
+1. Campaigns are locally persisted and restored across navigation/reload.
+2. Campaign name is required and unique (case-insensitive, trimmed).
+3. Creating a campaign auto-selects it.
 
-1. **LinkedIn-only activation + floating launcher**
-- Add content script match for `www.linkedin.com`.
-- Inject draggable circular `LI` button and persist position.
-- Playwright test: launcher appears on profile page, draggable, persisted after refresh.
+### Campaign Storage
+1. Primary persistence: `browser.storage.local`.
+2. Mirror fallback persistence: `localStorage` key `intouch:campaign-store:v1` to survive intermittent storage issues.
+3. Storage read/write sanitization is applied to prevent malformed data from crashing UI.
 
-2. **Campaign storage + campaign list/create**
-- Local storage schema for campaigns.
-- Create campaign flow with unique name (case-insensitive trimmed).
-- Playwright test: create campaign, duplicate-name rejection, persistence after reload.
+### Campaign Tabs
 
-3. **Campaign panel tabs scaffold**
-- Add `Message`, `Upload`, `People` tabs with campaign context.
-- Playwright test: tab switching and campaign context persistence.
+#### Message Tab
+1. Shows daily send limit input (PST day window).
+2. Shows persisted connection note input (used in connection request note).
+3. Shows only first `X` prospects for today where:
+   - `X = dailyLimit - sentToday(PST)`
+   - filtered to status `Prospect`
+4. `Start Campaign` disabled when no eligible prospects.
+5. While running, show `Stop Campaign` button.
+6. Under `Stop Campaign`, show:
+   - countdown in seconds
+   - next action description (for delay windows)
 
-4. **Message tab core**
-- Add daily limit input (persisted).
-- Add persisted connection-note input (used later during automation).
-- Add session prospect list UI (click opens profile in current tab).
-- Playwright test: both inputs persist, row click navigates correctly.
+#### Upload Tab
+1. CSV upload + mapping fields:
+   - Full Name
+   - Profile URL
+   - Company
+   - Job Title
+2. On import, show loading text while processing rows.
+3. Duplicate detection by normalized profile URL:
+   - duplicates already in campaign
+   - duplicates within uploaded CSV
+4. Duplicate popup format:
+   - title: `"X duplicates detected"`
+   - list of duplicate people below
+5. Non-duplicate valid rows still import.
 
-5. **Upload tab CSV + mapping**
-- Upload CSV, map required columns, import valid prospects.
-- Duplicate detection by normalized profile URL (in-campaign + in-file).
-- Show popup: `"X duplicates detected"` + duplicate people list.
-- Playwright test: import success, duplicate popup content, non-duplicates still imported.
+#### People Tab
+1. Shows all people in campaign with status.
+2. Clicking a person opens their profile in current tab.
+3. Deleting a person removes from campaign.
+4. Export CSV button exports all profiles + campaign status fields:
+   - Full Name
+   - Profile URL
+   - Company
+   - Job Title
+   - Status
+   - Last Attempt At
+   - Status Reason
 
-6. **People tab list/delete/export**
-- Show all prospects + status.
-- Delete prospect.
-- Export CSV with: Name, URL, Company, Job Title, Status, Last Attempt At, Status Reason.
-- Playwright test: delete works, export file schema/content is correct.
+## Automation Runtime Behavior
 
-7. **Automation engine skeleton + status state machine**
-- Queue from `Prospect` only.
-- Status transitions prepared: `Prospect`, `Sent Request`, `Already connected`, `Invalid Profile`.
-- PST daily-limit accounting and pause-on-limit behavior.
-- Playwright test: dry progression and state updates without clicking connect/send.
+### Start/Stop
+1. `Start Campaign` triggers background-runner orchestration.
+2. Active tab resolution is robust:
+   - message tab id (if present)
+   - sender tab id
+   - fallback active-tab query
+3. `Stop Campaign` stops run and clears next-action state.
 
-8. **LinkedIn action selectors + connect flow (pre-send validation only)**
-- Detect `Pending`/`Message` => mark `Already connected`.
-- Detect direct `Connect`, fallback through `More` menu for `Connect`.
-- Open connect modal, click `Add a note` when present, fill persisted note.
-- Enforce 5–10 second random delay before each action.
-- Playwright test on `wjayesh` profile: validate every step up to final send button, verify delays from timestamps.
-- **Do not click final send.**
+### Queue Construction
+1. Queue built from campaign prospects with `status === 'Prospect'`.
+2. Queue is capped to today’s remaining quota (`dailyLimit - sentToday(PST)`).
+3. Order follows campaign people list order (topmost first).
 
-9. **Final permission gate**
-- Once all above pass, pause and ask you for explicit permission.
-- Only after approval: perform final click on send connection request in Playwright validation.
+### Per-Prospect Flow
+For each queued profile:
+1. Navigate current tab to profile URL.
+2. Wait 5–10 seconds.
+3. Validate profile page (`/in/...`), else `Invalid Profile`.
+4. If `Pending` or `Message` is present in profile actions: mark `Already connected`.
+5. Attempt connect:
+   - try direct `Connect`
+   - if not visible, click profile-card `More` and then `Connect`
+6. If connection modal supports notes:
+   - click `Add a note`
+   - fill campaign connection note
+7. Click `Send` (except dry-run mode where it stops before send).
+8. Update status accordingly.
 
-## Public Interfaces / Data
+### Delay Policy
+1. Every action step uses randomized delay in `[5000ms, 10000ms]`.
+2. Countdown + next-action text are surfaced from background run-state.
 
-- `Campaign`: includes `dailyLimit`, persisted `connectionNote`, `prospects`.
-- `Prospect`: includes campaign status + audit fields.
-- `CsvImportResult`: includes `duplicates` for popup rendering.
-- Background/content message contracts:
-  - `START_CAMPAIGN`, `STOP_CAMPAIGN`, `RUN_NEXT_STEP`, `UPDATE_PROSPECT_STATUS`, `GET_RUN_STATE`.
+### Daily Quota (PST)
+1. Day window is midnight-to-midnight America/Los_Angeles.
+2. Once limit reached, campaign pauses/stops for current run.
+3. Sent counters tracked per PST date key.
 
-## Testing Protocol (Applied After Every Increment)
+## Status Model
+- `Prospect`
+- `Sent Request`
+- `Already connected`
+- `Invalid Profile`
 
-- Open LinkedIn profile URL above in Playwright MCP.
-- Validate only the newly delivered feature + regression check prior features.
-- Capture evidence by deterministic checks (visible text, control existence, storage state, status labels).
-- Maintain safe mode: no final send until explicit user approval.
+## Safety and Sending Rule
+1. During manual validation, do not click final `Send` until explicitly permitted by user.
+2. Pre-send validation path includes:
+   - `More -> Connect -> Add a note -> note filled -> Send visible`
 
-## Assumptions / Defaults
+## Debug and Observability
+Structured logs were added across layers with prefix `[InTouch]`:
+1. UI logs for create/start/stop/open/refresh.
+2. Content logs for mount and profile-processing message receipt.
+3. Background logs for message routing, tab resolution, queue build, navigation, and run results.
+4. Runner logs for action step timing and selector-path decisions.
 
-- “Small feature” = each numbered increment above.
-- Current-tab profile opening behavior is retained.
-- Duplicate identity key is normalized profile URL.
-- Convex deploy step remains non-applicable unless Convex endpoints are introduced.
+## Known Non-Functional Constraints
+1. No Convex endpoints currently in project; Convex deploy rule is not applicable.
+2. If TypeScript strictness blocks low-value progress, `// @ts-expect-error <reason>` may be used surgically.

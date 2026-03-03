@@ -11,8 +11,11 @@ export function getRandomDelayMs(
 export async function delayRandom(
   record?: (step: string) => void,
   step = 'delay',
-): Promise<void> {
+  onScheduled?: (delayMs: number) => void,
+): Promise<number> {
   record?.(step);
   const delay = getRandomDelayMs();
+  onScheduled?.(delay);
   await new Promise((resolve) => setTimeout(resolve, delay));
+  return delay;
 }

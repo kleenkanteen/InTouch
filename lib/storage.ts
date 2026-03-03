@@ -10,6 +10,28 @@ import {
   type RunState,
 } from './types';
 
+const CAMPAIGN_STORE_MIRROR_KEY = 'intouch:campaign-store:v1';
+
+function readCampaignMirror(): CampaignStore | null {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(CAMPAIGN_STORE_MIRROR_KEY);
+    if (!raw) return null;
+    return sanitizeCampaignStore(JSON.parse(raw) as CampaignStore);
+  } catch {
+    return null;
+  }
+}
+
+function writeCampaignMirror(store: CampaignStore): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(CAMPAIGN_STORE_MIRROR_KEY, JSON.stringify(store));
+  } catch {
+    // Ignore mirror write failures.
+  }
+}
+
 function sanitizeCampaignStore(input?: Partial<CampaignStore>): CampaignStore {
   const campaigns = Array.isArray(input?.campaigns)
     ? input!.campaigns.filter(
@@ -46,6 +68,29 @@ function sanitizeCampaignStore(input?: Partial<CampaignStore>): CampaignStore {
   };
 }
 
+function sanitizeRunState(input?: Partial<RunState>): RunState {
+  const dailySentCountByPstDate =
+    input?.dailySentCountByPstDate && typeof input.dailySentCountByPstDate === 'object'
+      ? input.dailySentCountByPstDate
+      : {};
+
+  return {
+    isRunning: Boolean(input?.isRunning),
+    campaignId: typeof input?.campaignId === 'string' ? input.campaignId : null,
+    queue: Array.isArray(input?.queue) ? input.queue.filter((id): id is string => typeof id === 'string') : [],
+    currentProspectId:
+      typeof input?.currentProspectId === 'string' ? input.currentProspectId : null,
+    runStartedAt: typeof input?.runStartedAt === 'string' ? input.runStartedAt : null,
+    dailySentCountByPstDate,
+    nextActionLabel:
+      typeof input?.nextActionLabel === 'string' ? input.nextActionLabel : null,
+    nextActionAt:
+      typeof input?.nextActionAt === 'number' && Number.isFinite(input.nextActionAt)
+        ? input.nextActionAt
+        : null,
+  };
+}
+
 function withBrowserStorage<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   if (typeof browser === 'undefined' || !browser.storage?.local) {
     return Promise.resolve(fallback);
@@ -57,15 +102,21 @@ function withBrowserStorage<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
 export async function getCampaignStore(): Promise<CampaignStore> {
   return withBrowserStorage(async () => {
     const out = await browser.storage.local.get(CAMPAIGN_STORE_KEY);
-    return sanitizeCampaignStore(out[CAMPAIGN_STORE_KEY] as CampaignStore | undefined);
+    const primary = sanitizeCampaignStore(out[CAMPAIGN_STORE_KEY] as CampaignStore | undefined);
+    if (primary.campaigns.length) {
+      return primary;
+    }
+    return readCampaignMirror() ?? primary;
   }, DEFAULT_CAMPAIGN_STORE);
 }
 
 export async function setCampaignStore(store: CampaignStore): Promise<void> {
+  const sanitized = sanitizeCampaignStore(store);
+  writeCampaignMirror(sanitized);
   await withBrowserStorage(
     async () =>
       browser.storage.local.set({
-        [CAMPAIGN_STORE_KEY]: sanitizeCampaignStore(store),
+        [CAMPAIGN_STORE_KEY]: sanitized,
       }),
     undefined,
   );
@@ -83,16 +134,14 @@ export async function updateCampaignStore(
 export async function getRunState(): Promise<RunState> {
   return withBrowserStorage(async () => {
     const out = await browser.storage.local.get(RUN_STATE_KEY);
-    return {
-      ...DEFAULT_RUN_STATE,
-      ...(out[RUN_STATE_KEY] as RunState | undefined),
-    };
+    return sanitizeRunState(out[RUN_STATE_KEY] as RunState | undefined);
   }, DEFAULT_RUN_STATE);
 }
 
 export async function setRunState(runState: RunState): Promise<void> {
+  const sanitized = sanitizeRunState(runState);
   await withBrowserStorage(
-    async () => browser.storage.local.set({ [RUN_STATE_KEY]: runState }),
+    async () => browser.storage.local.set({ [RUN_STATE_KEY]: sanitized }),
     undefined,
   );
 }

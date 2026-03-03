@@ -4,7 +4,7 @@ export type RuntimeMessage =
   | {
       type: 'START_CAMPAIGN';
       campaignId: string;
-      tabId: number;
+      tabId?: number;
       dryRun?: boolean;
     }
   | { type: 'STOP_CAMPAIGN' }
@@ -13,7 +13,7 @@ export type RuntimeMessage =
   | {
       type: 'OPEN_PROFILE';
       profileUrl: string;
-      tabId: number;
+      tabId?: number;
     }
   | {
       type: 'UPDATE_PROSPECT_STATUS';
@@ -28,6 +28,11 @@ export type RuntimeMessage =
       prospectId: string;
       note: string;
       dryRun?: boolean;
+    }
+  | {
+      type: 'SET_RUN_NEXT_ACTION';
+      nextActionLabel: string | null;
+      nextActionAt: number | null;
     };
 
 export interface ProcessProfileResult {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import CampaignPanel from './CampaignPanel.vue';
 import {
   createCampaign,
@@ -25,11 +25,15 @@ const runState = ref<RunState>({
   currentProspectId: null,
   runStartedAt: null,
   dailySentCountByPstDate: {},
+  nextActionLabel: null,
+  nextActionAt: null,
 });
 const todayPstKey = computed(() => getPstDateKey());
 const sentToday = computed(() => runState.value.dailySentCountByPstDate[todayPstKey.value] || 0);
+const nextActionCountdown = ref<number | null>(null);
 let persistQueue: Promise<void> = Promise.resolve();
 let isPersistingStore = false;
+let countdownInterval: number | null = null;
 
 function queuePersistStore(): Promise<void> {
   persistQueue = persistQueue.then(async () => {
@@ -47,6 +51,14 @@ function queuePersistStore(): Promise<void> {
 async function refresh() {
   store.value = await getCampaignStore();
   runState.value = await getRunState();
+  console.log('[InTouch][UI] refresh', {
+    campaigns: store.value.campaigns.length,
+    activeCampaignId: store.value.activeCampaignId,
+    isRunning: runState.value.isRunning,
+    queue: runState.value.queue.length,
+    nextActionLabel: runState.value.nextActionLabel,
+    nextActionAt: runState.value.nextActionAt,
+  });
 }
 
 async function movePanel(x: number, y: number) {
@@ -64,6 +76,7 @@ async function selectCampaign(campaignId: string) {
 
 async function createNewCampaign(name: string) {
   try {
+    console.log('[InTouch][UI] createNewCampaign:start', { name });
     const normalized = normalizeCampaignName(name);
     const exists = store.value.campaigns.some(
       (campaign) => normalizeCampaignName(campaign?.name) === normalized,
@@ -80,6 +93,10 @@ async function createNewCampaign(name: string) {
       activeCampaignId: campaign.id,
     };
     await queuePersistStore();
+    console.log('[InTouch][UI] createNewCampaign:done', {
+      campaignId: campaign.id,
+      campaigns: store.value.campaigns.length,
+    });
   } catch (error) {
     console.error('Failed to create campaign', error);
     window.alert('Failed to create campaign. Please refresh and try again.');
@@ -129,40 +146,60 @@ async function removeProspect(payload: { campaignId: string; prospectId: string 
 }
 
 async function startCampaign(campaignId: string) {
-  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!activeTab?.id) {
-    window.alert('Unable to determine current tab');
-    return;
-  }
-
+  console.log('[InTouch][UI] startCampaign:click', { campaignId });
   const message: RuntimeMessage = {
     type: 'START_CAMPAIGN',
     campaignId,
-    tabId: activeTab.id,
   };
 
-  await browser.runtime.sendMessage(message);
+  const result = (await browser.runtime.sendMessage(message)) as { started?: boolean; reason?: string } | undefined;
+  console.log('[InTouch][UI] startCampaign:response', { result });
+  if (result && result.started === false) {
+    window.alert(result.reason || 'Unable to start campaign');
+    return;
+  }
+
   runState.value = {
     ...runState.value,
     isRunning: true,
     campaignId,
   };
+  console.log('[InTouch][UI] startCampaign:localStateUpdated', {
+    isRunning: runState.value.isRunning,
+    campaignId: runState.value.campaignId,
+  });
 }
 
 async function stopCampaign() {
+  console.log('[InTouch][UI] stopCampaign:click');
   await browser.runtime.sendMessage({ type: 'STOP_CAMPAIGN' } satisfies RuntimeMessage);
+  nextActionCountdown.value = null;
   await refresh();
 }
 
 async function openProspect(prospect: Prospect) {
   if (!prospect.profileUrl) return;
-  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!activeTab?.id) return;
-  await browser.tabs.update(activeTab.id, { url: prospect.profileUrl });
+  console.log('[InTouch][UI] openProspect', { prospectId: prospect.id, profileUrl: prospect.profileUrl });
+  await browser.runtime.sendMessage({
+    type: 'OPEN_PROFILE',
+    profileUrl: prospect.profileUrl,
+  } satisfies RuntimeMessage);
 }
 
 onMounted(async () => {
   await refresh();
+  countdownInterval = window.setInterval(() => {
+    if (!runState.value.nextActionAt) {
+      nextActionCountdown.value = null;
+      return;
+    }
+    const seconds = Math.max(0, Math.ceil((runState.value.nextActionAt - Date.now()) / 1000));
+    nextActionCountdown.value = seconds;
+    if (seconds <= 0 && !runState.value.isRunning) {
+      nextActionCountdown.value = null;
+    }
+  }, 250);
+
   browser.storage.onChanged.addListener(async (changes, area) => {
     if (area !== 'local') return;
     if (changes['liCampaigns:v1'] || changes['liRunState:v1']) {
@@ -173,6 +210,13 @@ onMounted(async () => {
     }
   });
 });
+
+onBeforeUnmount(() => {
+  if (countdownInterval !== null) {
+    window.clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+});
 </script>
 
 <template>
@@ -181,6 +225,8 @@ onMounted(async () => {
     :active-campaign-id="store.activeCampaignId"
     :is-running="runState.isRunning"
     :sent-today="sentToday"
+    :next-action-label="runState.nextActionLabel"
+    :next-action-countdown="nextActionCountdown"
     :x="store.panelPosition.x"
     :y="store.panelPosition.y"
     @select-campaign="selectCampaign"

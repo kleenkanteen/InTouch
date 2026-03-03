@@ -45,6 +45,8 @@ export interface RunState {
   currentProspectId: string | null;
   runStartedAt: string | null;
   dailySentCountByPstDate: Record<string, number>;
+  nextActionLabel: string | null;
+  nextActionAt: number | null;
 }
 
 export interface DuplicateRecord {
@@ -84,6 +86,8 @@ export const DEFAULT_RUN_STATE: RunState = {
   currentProspectId: null,
   runStartedAt: null,
   dailySentCountByPstDate: {},
+  nextActionLabel: null,
+  nextActionAt: null,
 };
 
 export const DEFAULT_CAMPAIGN_STORE: CampaignStore = {
