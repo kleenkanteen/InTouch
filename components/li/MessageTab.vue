@@ -67,8 +67,11 @@ const sessionProspects = computed(() =>
 
     <button class="start" v-if="!isRunning" :disabled="!sessionProspects.length" @click="emit('start')">Start Campaign</button>
     <button class="stop" v-else @click="emit('stop')">Stop Campaign</button>
-    <p v-if="isRunning && nextActionCountdown !== null" class="countdown">
-      Next action in {{ nextActionCountdown }}s<span v-if="nextActionLabel">: {{ nextActionLabel }}</span>
+    <p v-if="isRunning" class="countdown">
+      <span v-if="nextActionCountdown !== null">
+        Next action in {{ nextActionCountdown }}s<span v-if="nextActionLabel">: {{ nextActionLabel }}</span>
+      </span>
+      <span v-else>Waiting for next action...</span>
     </p>
   </div>
 </template>

@@ -67,16 +67,16 @@ async function sendProcessMessage(
   message: Extract<RuntimeMessage, { type: 'PROCESS_CURRENT_PROFILE' }>,
 ): Promise<ProcessProfileResult> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
       const result = (await browser.tabs.sendMessage(tabId, message)) as ProcessProfileResult;
       return result;
     } catch (error) {
       lastError = error;
-      if (!isMissingContentScriptError(error) || attempt === 5) {
+      if (!isMissingContentScriptError(error) || attempt === 19) {
         throw error;
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 750));
     }
   }
 
@@ -214,6 +214,7 @@ async function runCampaign(
 
         console.log('[InTouch][BG] runCampaign:navigate', { tabId, normalizedUrl });
         await navigateTabToProfile(tabId, normalizedUrl);
+        await new Promise((resolve) => setTimeout(resolve, 700));
         console.log('[InTouch][BG] runCampaign:tab-complete', { tabId, normalizedUrl });
 
         const result = await sendProcessMessage(tabId, {
@@ -228,7 +229,9 @@ async function runCampaign(
           result,
         });
 
-        await setProspectStatus(campaignId, prospect.id, result.status, result.reason);
+        if (result.status === 'Invalid Profile') {
+          await setProspectStatus(campaignId, prospect.id, 'Invalid Profile', result.reason);
+        }
 
         if (result.status === 'Sent Request') {
           console.log('[InTouch][BG] runCampaign:sent-request', { prospectId: prospect.id });
@@ -246,7 +249,6 @@ async function runCampaign(
           prospectId: prospect.id,
           error,
         });
-        await setProspectStatus(campaignId, prospect.id, 'Invalid Profile', 'Profile processing failed');
       }
     }
 

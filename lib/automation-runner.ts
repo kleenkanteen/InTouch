@@ -6,6 +6,19 @@ function waitFor(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForActionControls(timeoutMs = 8_000, intervalMs = 250) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = getLinkedInElements();
+  while (Date.now() < deadline) {
+    if (latest.connectButton || latest.moreButton || latest.connectInMenuButton) {
+      return latest;
+    }
+    await waitFor(intervalMs);
+    latest = getLinkedInElements();
+  }
+  return latest;
+}
+
 export async function processCurrentProfile(
   note: string,
   dryRun = false,
@@ -23,11 +36,15 @@ export async function processCurrentProfile(
   });
 
   const setNextAction = async (label: string | null, at: number | null) => {
-    await browser.runtime.sendMessage({
-      type: 'SET_RUN_NEXT_ACTION',
-      nextActionLabel: label,
-      nextActionAt: at,
-    } satisfies RuntimeMessage);
+    try {
+      await browser.runtime.sendMessage({
+        type: 'SET_RUN_NEXT_ACTION',
+        nextActionLabel: label,
+        nextActionAt: at,
+      } satisfies RuntimeMessage);
+    } catch (error) {
+      console.warn('[InTouch][Runner] setNextAction:failed', { label, at, error });
+    }
   };
 
   const waitForAction = async (step: string, nextActionLabel: string) => {
@@ -46,8 +63,13 @@ export async function processCurrentProfile(
     return { status: 'Invalid Profile', reason: 'Not on /in/ profile page', timeline };
   }
 
+  await setNextAction('Wait for profile to fully load', Date.now() + 3000);
+  await waitFor(3000);
+  record('profile-load-wait-3s');
+  await setNextAction(null, null);
+
   await waitForAction('post-navigation-delay', 'Scan profile action buttons');
-  let elements = getLinkedInElements();
+  let elements = await waitForActionControls(8_000, 250);
   console.log('[InTouch][Runner] elements:initial', {
     hasPending: Boolean(elements.pendingButton),
     hasMessage: Boolean(elements.messageButton),
@@ -55,18 +77,12 @@ export async function processCurrentProfile(
     hasMore: Boolean(elements.moreButton),
   });
 
-  if (elements.pendingButton || elements.messageButton) {
-    console.log('[InTouch][Runner] already-connected');
-    await setNextAction(null, null);
-    return { status: 'Already connected', reason: 'Pending or Message detected', timeline };
-  }
-
   if (!elements.connectButton && elements.moreButton) {
     await waitForAction('pre-click-more', 'Click More');
     elements.moreButton.click();
     record('clicked-more');
-    await waitFor(800);
-    elements = getLinkedInElements();
+    await waitFor(900);
+    elements = await waitForActionControls(4_000, 200);
     console.log('[InTouch][Runner] elements:after-more', {
       hasConnectInMenu: Boolean(elements.connectInMenuButton),
       hasConnect: Boolean(elements.connectButton),
@@ -77,9 +93,18 @@ export async function processCurrentProfile(
   if (!connectButton) {
     console.warn('[InTouch][Runner] invalid-profile:no-connect-button');
     await setNextAction(null, null);
-    return { status: 'Invalid Profile', reason: 'Connect button unavailable', timeline };
+    return {
+      status: 'Invalid Profile',
+      reason: 'Connect button not found on profile page (already connected)',
+      timeline,
+    };
   }
 
+  console.log('[InTouch][Runner] connect-button-found', {
+    tag: connectButton.tagName,
+    className: connectButton.className,
+    text: (connectButton.textContent || '').trim().slice(0, 120),
+  });
   await waitForAction('pre-click-connect', 'Click Connect');
   connectButton.click();
   record('clicked-connect');
