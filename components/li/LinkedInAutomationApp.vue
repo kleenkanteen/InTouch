@@ -8,7 +8,7 @@ import {
   normalizeCampaignName,
   setCampaignStore,
 } from '@/lib/storage';
-import type { CampaignStore, Prospect, RunState } from '@/lib/types';
+import type { Campaign, CampaignStore, Prospect, RunState } from '@/lib/types';
 import type { RuntimeMessage } from '@/lib/runtime-messages';
 import { getPstDateKey } from '@/lib/time-pst';
 
@@ -147,17 +147,38 @@ async function removeProspect(payload: { campaignId: string; prospectId: string 
 
 async function startCampaign(campaignId: string) {
   console.log('[InTouch][UI] startCampaign:click', { campaignId });
+  const campaign = store.value.campaigns.find((item) => item.id === campaignId);
+  if (!campaign) {
+    window.alert('Unable to start campaign: campaign not found.');
+    return;
+  }
+
+  const firstEligibleProspect = campaign.prospects.find((prospect) => prospect.status === 'Prospect');
+  if (!firstEligibleProspect) {
+    window.alert('No prospects are ready to run for this campaign.');
+    return;
+  }
+
+  let runTabId: number | undefined;
+  try {
+    const opened = (await browser.runtime.sendMessage({
+      type: 'OPEN_PROFILE',
+      profileUrl: firstEligibleProspect.profileUrl,
+    } satisfies RuntimeMessage)) as { id?: number } | undefined;
+    if (typeof opened?.id === 'number') {
+      runTabId = opened.id;
+    }
+  } catch (error) {
+    console.error('[InTouch][UI] startCampaign:open-first-profile-error', error);
+  }
+
+  const campaignSnapshot = JSON.parse(JSON.stringify(campaign)) as Campaign;
   const message: RuntimeMessage = {
     type: 'START_CAMPAIGN',
     campaignId,
+    tabId: runTabId,
+    campaign: campaignSnapshot,
   };
-
-  const result = (await browser.runtime.sendMessage(message)) as { started?: boolean; reason?: string } | undefined;
-  console.log('[InTouch][UI] startCampaign:response', { result });
-  if (result && result.started === false) {
-    window.alert(result.reason || 'Unable to start campaign');
-    return;
-  }
 
   runState.value = {
     ...runState.value,
@@ -167,6 +188,10 @@ async function startCampaign(campaignId: string) {
   console.log('[InTouch][UI] startCampaign:localStateUpdated', {
     isRunning: runState.value.isRunning,
     campaignId: runState.value.campaignId,
+  });
+
+  void browser.runtime.sendMessage(message).catch((error) => {
+    console.error('[InTouch][UI] startCampaign:message-error', error);
   });
 }
 

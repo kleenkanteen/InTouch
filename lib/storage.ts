@@ -165,12 +165,19 @@ export function normalizeProfileUrl(profileUrl: string): string {
     return '';
   }
 
+  let candidate = raw;
+  if (/^www\.linkedin\.com\//i.test(candidate) || /^linkedin\.com\//i.test(candidate)) {
+    candidate = `https://${candidate}`;
+  } else if (/^\/in\//i.test(candidate)) {
+    candidate = `https://www.linkedin.com${candidate}`;
+  }
+
   try {
-    const parsed = new URL(raw);
-    const normalizedPath = parsed.pathname.replace(/\/+$/, '').toLowerCase();
+    const parsed = new URL(candidate);
+    const normalizedPath = parsed.pathname.replace(/\/+$/, '');
     return `${parsed.origin.toLowerCase()}${normalizedPath}`;
   } catch {
-    return raw.replace(/\/+$/, '').toLowerCase();
+    return candidate.replace(/\/+$/, '').toLowerCase();
   }
 }
 

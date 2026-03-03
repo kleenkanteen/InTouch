@@ -36,6 +36,53 @@ function buildProspectQueue(campaign: Campaign): Prospect[] {
   return campaign.prospects.filter((prospect) => prospect.status === 'Prospect');
 }
 
+async function navigateTabToProfile(tabId: number, profileUrl: string): Promise<void> {
+  let currentUrl = '';
+  try {
+    const tab = await browser.tabs.get(tabId);
+    currentUrl = normalizeProfileUrl(tab.url || '');
+  } catch {
+    currentUrl = '';
+  }
+
+  if (currentUrl === profileUrl) {
+    console.log('[InTouch][BG] runCampaign:navigate-skip-already-on-profile', { tabId, profileUrl });
+    return;
+  }
+
+  await browser.tabs.update(tabId, { url: profileUrl });
+  await waitForTabComplete(tabId);
+}
+
+function isMissingContentScriptError(error: unknown): boolean {
+  const message = (error as { message?: string })?.message || String(error);
+  return (
+    message.includes('Receiving end does not exist') ||
+    message.includes('Could not establish connection')
+  );
+}
+
+async function sendProcessMessage(
+  tabId: number,
+  message: Extract<RuntimeMessage, { type: 'PROCESS_CURRENT_PROFILE' }>,
+): Promise<ProcessProfileResult> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const result = (await browser.tabs.sendMessage(tabId, message)) as ProcessProfileResult;
+      return result;
+    } catch (error) {
+      lastError = error;
+      if (!isMissingContentScriptError(error) || attempt === 5) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  throw lastError;
+}
+
 async function setProspectStatus(
   campaignId: string,
   prospectId: string,
@@ -52,13 +99,37 @@ async function setProspectStatus(
   }));
 }
 
-async function runCampaign(campaignId: string, tabId: number, dryRun = false): Promise<void> {
+async function syncCampaignSnapshot(campaign: Campaign): Promise<void> {
+  await updateCampaignStore((store) => {
+    const existing = store.campaigns.some((item) => item.id === campaign.id);
+    return {
+      ...store,
+      campaigns: existing
+        ? store.campaigns.map((item) => (item.id === campaign.id ? campaign : item))
+        : [campaign, ...store.campaigns],
+      activeCampaignId: store.activeCampaignId ?? campaign.id,
+    };
+  });
+}
+
+async function runCampaign(
+  campaignId: string,
+  tabId: number,
+  dryRun = false,
+  campaignSnapshot?: Campaign,
+): Promise<void> {
   console.log('[InTouch][BG] runCampaign:start', { campaignId, tabId, dryRun });
   try {
     stopRequested = false;
 
+    if (campaignSnapshot && campaignSnapshot.id === campaignId) {
+      await syncCampaignSnapshot(campaignSnapshot);
+    }
+
     const store = await getCampaignStore();
-    const campaign = store.campaigns.find((item) => item.id === campaignId);
+    const campaign =
+      (campaignSnapshot && campaignSnapshot.id === campaignId ? campaignSnapshot : null) ??
+      store.campaigns.find((item) => item.id === campaignId);
     if (!campaign) {
       console.warn('[InTouch][BG] runCampaign:campaign-not-found', { campaignId });
       return;
@@ -102,19 +173,19 @@ async function runCampaign(campaignId: string, tabId: number, dryRun = false): P
       return;
     }
 
-    for (const prospect of queue) {
+    for (const [index, prospect] of queue.entries()) {
       if (stopRequested) break;
-    console.log('[InTouch][BG] runCampaign:prospect-start', {
-      prospectId: prospect.id,
-      profileUrl: prospect.profileUrl,
-    });
+      console.log('[InTouch][BG] runCampaign:prospect-start', {
+        prospectId: prospect.id,
+        profileUrl: prospect.profileUrl,
+      });
 
       const runState = await getRunState();
       await setRunState({
         ...runState,
         currentProspectId: prospect.id,
         campaignId,
-        queue: queue.map((item) => item.id),
+        queue: queue.slice(index).map((item) => item.id),
       });
       const pstKey = getPstDateKey();
       const sentToday = (runState.dailySentCountByPstDate?.[pstKey] ?? 0);
@@ -134,46 +205,48 @@ async function runCampaign(campaignId: string, tabId: number, dryRun = false): P
         return;
       }
 
-      const normalizedUrl = normalizeProfileUrl(prospect.profileUrl);
-    console.log('[InTouch][BG] runCampaign:navigate', { tabId, normalizedUrl });
-      await browser.tabs.update(tabId, { url: normalizedUrl });
-      await waitForTabComplete(tabId);
-    console.log('[InTouch][BG] runCampaign:tab-complete', { tabId, normalizedUrl });
-
-      let result: ProcessProfileResult;
       try {
-        result = (await browser.tabs.sendMessage(tabId, {
+        const normalizedUrl = normalizeProfileUrl(prospect.profileUrl);
+        if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
+          await setProspectStatus(campaignId, prospect.id, 'Invalid Profile', 'Invalid profile URL');
+          continue;
+        }
+
+        console.log('[InTouch][BG] runCampaign:navigate', { tabId, normalizedUrl });
+        await navigateTabToProfile(tabId, normalizedUrl);
+        console.log('[InTouch][BG] runCampaign:tab-complete', { tabId, normalizedUrl });
+
+        const result = await sendProcessMessage(tabId, {
           type: 'PROCESS_CURRENT_PROFILE',
           campaignId,
           prospectId: prospect.id,
           note: campaign.connectionNote,
           dryRun,
-        } satisfies RuntimeMessage)) as ProcessProfileResult;
-      console.log('[InTouch][BG] runCampaign:process-result', {
-        prospectId: prospect.id,
-        result,
-      });
-      } catch (error) {
-      console.error('[InTouch][BG] runCampaign:process-error', {
-        prospectId: prospect.id,
-        error,
-      });
-        await setProspectStatus(campaignId, prospect.id, 'Invalid Profile', 'Content script message failed');
-        continue;
-      }
-
-      await setProspectStatus(campaignId, prospect.id, result.status, result.reason);
-
-      if (result.status === 'Sent Request') {
-      console.log('[InTouch][BG] runCampaign:sent-request', { prospectId: prospect.id });
-        const latest = await getRunState();
-        await setRunState({
-          ...latest,
-          dailySentCountByPstDate: {
-            ...latest.dailySentCountByPstDate,
-            [pstKey]: (latest.dailySentCountByPstDate[pstKey] || 0) + 1,
-          },
         });
+        console.log('[InTouch][BG] runCampaign:process-result', {
+          prospectId: prospect.id,
+          result,
+        });
+
+        await setProspectStatus(campaignId, prospect.id, result.status, result.reason);
+
+        if (result.status === 'Sent Request') {
+          console.log('[InTouch][BG] runCampaign:sent-request', { prospectId: prospect.id });
+          const latest = await getRunState();
+          await setRunState({
+            ...latest,
+            dailySentCountByPstDate: {
+              ...latest.dailySentCountByPstDate,
+              [pstKey]: (latest.dailySentCountByPstDate[pstKey] || 0) + 1,
+            },
+          });
+        }
+      } catch (error) {
+        console.error('[InTouch][BG] runCampaign:process-error', {
+          prospectId: prospect.id,
+          error,
+        });
+        await setProspectStatus(campaignId, prospect.id, 'Invalid Profile', 'Profile processing failed');
       }
     }
 
@@ -233,8 +306,17 @@ export default defineBackground(() => {
     if (message.type === 'START_CAMPAIGN') {
       const tabId = message.tabId ?? sender.tab?.id;
       if (tabId) {
-        void runCampaign(message.campaignId, tabId, Boolean(message.dryRun));
-        return Promise.resolve({ started: true, tabId });
+        return runCampaign(
+          message.campaignId,
+          tabId,
+          Boolean(message.dryRun),
+          message.campaign,
+        )
+          .then(() => ({ started: true, tabId }))
+          .catch((error) => {
+            console.error('[InTouch][BG] startCampaign:run-error', error);
+            return { started: false, reason: 'Campaign run failed' };
+          });
       }
 
       return browser.tabs
@@ -244,8 +326,17 @@ export default defineBackground(() => {
           if (!resolvedTabId) {
             return { started: false, reason: 'No active tab id' };
           }
-          void runCampaign(message.campaignId, resolvedTabId, Boolean(message.dryRun));
-          return { started: true, tabId: resolvedTabId };
+          return runCampaign(
+            message.campaignId,
+            resolvedTabId,
+            Boolean(message.dryRun),
+            message.campaign,
+          )
+            .then(() => ({ started: true, tabId: resolvedTabId }))
+            .catch((error) => {
+              console.error('[InTouch][BG] startCampaign:run-error', error);
+              return { started: false, reason: 'Campaign run failed' };
+            });
         })
         .catch((error) => {
           console.error('[InTouch][BG] startCampaign:tab-resolution-error', error);

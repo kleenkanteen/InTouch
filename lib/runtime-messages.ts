@@ -1,4 +1,4 @@
-import type { ProspectStatus } from './types';
+import type { Campaign, ProspectStatus } from './types';
 
 export type RuntimeMessage =
   | {
@@ -6,6 +6,7 @@ export type RuntimeMessage =
       campaignId: string;
       tabId?: number;
       dryRun?: boolean;
+      campaign?: Campaign;
     }
   | { type: 'STOP_CAMPAIGN' }
   | { type: 'GET_RUN_STATE' }
