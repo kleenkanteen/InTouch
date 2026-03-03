@@ -10,6 +10,42 @@ import {
   type RunState,
 } from './types';
 
+function sanitizeCampaignStore(input?: Partial<CampaignStore>): CampaignStore {
+  const campaigns = Array.isArray(input?.campaigns)
+    ? input!.campaigns.filter(
+        (campaign): campaign is Campaign =>
+          Boolean(campaign) &&
+          typeof campaign.id === 'string' &&
+          typeof campaign.name === 'string' &&
+          Array.isArray(campaign.prospects),
+      )
+    : [];
+
+  const activeCampaignId =
+    typeof input?.activeCampaignId === 'string' ? input.activeCampaignId : null;
+
+  const floatingButtonPosition =
+    input?.floatingButtonPosition &&
+    Number.isFinite(input.floatingButtonPosition.x) &&
+    Number.isFinite(input.floatingButtonPosition.y)
+      ? input.floatingButtonPosition
+      : DEFAULT_CAMPAIGN_STORE.floatingButtonPosition;
+
+  const panelPosition =
+    input?.panelPosition &&
+    Number.isFinite(input.panelPosition.x) &&
+    Number.isFinite(input.panelPosition.y)
+      ? input.panelPosition
+      : DEFAULT_CAMPAIGN_STORE.panelPosition;
+
+  return {
+    campaigns,
+    activeCampaignId,
+    floatingButtonPosition,
+    panelPosition,
+  };
+}
+
 function withBrowserStorage<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   if (typeof browser === 'undefined' || !browser.storage?.local) {
     return Promise.resolve(fallback);
@@ -21,16 +57,16 @@ function withBrowserStorage<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
 export async function getCampaignStore(): Promise<CampaignStore> {
   return withBrowserStorage(async () => {
     const out = await browser.storage.local.get(CAMPAIGN_STORE_KEY);
-    return {
-      ...DEFAULT_CAMPAIGN_STORE,
-      ...(out[CAMPAIGN_STORE_KEY] as CampaignStore | undefined),
-    };
+    return sanitizeCampaignStore(out[CAMPAIGN_STORE_KEY] as CampaignStore | undefined);
   }, DEFAULT_CAMPAIGN_STORE);
 }
 
 export async function setCampaignStore(store: CampaignStore): Promise<void> {
   await withBrowserStorage(
-    async () => browser.storage.local.set({ [CAMPAIGN_STORE_KEY]: store }),
+    async () =>
+      browser.storage.local.set({
+        [CAMPAIGN_STORE_KEY]: sanitizeCampaignStore(store),
+      }),
     undefined,
   );
 }
@@ -70,8 +106,8 @@ export async function updateRunState(
   return updated;
 }
 
-export function normalizeCampaignName(name: string): string {
-  return name.trim().toLowerCase();
+export function normalizeCampaignName(name: string | null | undefined): string {
+  return (name || '').trim().toLowerCase();
 }
 
 export function normalizeProfileUrl(profileUrl: string): string {

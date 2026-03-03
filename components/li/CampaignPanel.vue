@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import type { Campaign, Prospect } from '@/lib/types';
 import CampaignList from './CampaignList.vue';
 import CampaignTabs from './CampaignTabs.vue';
@@ -34,24 +34,56 @@ const selectedTab = ref<'Message' | 'Upload' | 'People'>('Message');
 const dragging = ref(false);
 let offsetX = 0;
 let offsetY = 0;
+let startX = 0;
+let startY = 0;
+let dragEnabled = false;
 
-function onDragStart(event: PointerEvent) {
-  dragging.value = true;
-  offsetX = event.clientX - props.x;
-  offsetY = event.clientY - props.y;
-  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-}
+const DRAG_THRESHOLD_PX = 6;
+const DRAG_HOLD_MS = 120;
+let dragStartTimer: number | null = null;
 
-function onDragMove(event: PointerEvent) {
-  if (!dragging.value) return;
+function onWindowMouseMove(event: MouseEvent) {
+  if (!dragging.value || !dragEnabled) return;
+  const movedDistance = Math.hypot(event.clientX - startX, event.clientY - startY);
+  if (movedDistance < DRAG_THRESHOLD_PX) return;
   const x = Math.max(0, event.clientX - offsetX);
   const y = Math.max(0, event.clientY - offsetY);
   emit('movePanel', x, y);
 }
 
-function onDragEnd() {
+function onWindowMouseUp() {
+  if (dragStartTimer !== null) {
+    window.clearTimeout(dragStartTimer);
+    dragStartTimer = null;
+  }
   dragging.value = false;
+  dragEnabled = false;
+  window.removeEventListener('mousemove', onWindowMouseMove);
+  window.removeEventListener('mouseup', onWindowMouseUp);
 }
+
+function onDragStart(event: MouseEvent) {
+  if (event.button !== 0) return;
+  dragging.value = true;
+  dragEnabled = false;
+  startX = event.clientX;
+  startY = event.clientY;
+  offsetX = event.clientX - props.x;
+  offsetY = event.clientY - props.y;
+  dragStartTimer = window.setTimeout(() => {
+    dragEnabled = true;
+  }, DRAG_HOLD_MS);
+  window.addEventListener('mousemove', onWindowMouseMove);
+  window.addEventListener('mouseup', onWindowMouseUp);
+}
+
+onBeforeUnmount(() => {
+  if (dragStartTimer !== null) {
+    window.clearTimeout(dragStartTimer);
+  }
+  window.removeEventListener('mousemove', onWindowMouseMove);
+  window.removeEventListener('mouseup', onWindowMouseUp);
+});
 
 const activeCampaign = computed(() =>
   props.campaigns.find((campaign) => campaign.id === props.activeCampaignId) ?? null,
@@ -62,9 +94,7 @@ const activeCampaign = computed(() =>
   <div class="panel" :style="{ left: `${x}px`, top: `${y}px` }">
     <h3
       class="drag-handle"
-      @pointerdown="onDragStart"
-      @pointermove="onDragMove"
-      @pointerup="onDragEnd"
+      @mousedown="onDragStart"
     >
       LinkedIn Campaigns
     </h3>

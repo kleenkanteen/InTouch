@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import CampaignPanel from './CampaignPanel.vue';
-import FloatingLauncher from './FloatingLauncher.vue';
 import {
   createCampaign,
   getCampaignStore,
@@ -27,22 +26,27 @@ const runState = ref<RunState>({
   runStartedAt: null,
   dailySentCountByPstDate: {},
 });
-const isPanelOpen = ref(false);
 const todayPstKey = computed(() => getPstDateKey());
 const sentToday = computed(() => runState.value.dailySentCountByPstDate[todayPstKey.value] || 0);
-const shouldShowPanel = computed(() => runState.value.isRunning || isPanelOpen.value);
+let persistQueue: Promise<void> = Promise.resolve();
+let isPersistingStore = false;
+
+function queuePersistStore(): Promise<void> {
+  persistQueue = persistQueue.then(async () => {
+    isPersistingStore = true;
+    try {
+      await setCampaignStore(store.value);
+    } finally {
+      isPersistingStore = false;
+    }
+  });
+
+  return persistQueue;
+}
 
 async function refresh() {
   store.value = await getCampaignStore();
   runState.value = await getRunState();
-}
-
-async function moveLauncher(x: number, y: number) {
-  store.value = {
-    ...store.value,
-    floatingButtonPosition: { x, y },
-  };
-  await setCampaignStore(store.value);
 }
 
 async function movePanel(x: number, y: number) {
@@ -50,29 +54,36 @@ async function movePanel(x: number, y: number) {
     ...store.value,
     panelPosition: { x, y },
   };
-  await setCampaignStore(store.value);
+  await queuePersistStore();
 }
 
 async function selectCampaign(campaignId: string) {
   store.value = { ...store.value, activeCampaignId: campaignId };
-  await setCampaignStore(store.value);
+  await queuePersistStore();
 }
 
 async function createNewCampaign(name: string) {
-  const normalized = normalizeCampaignName(name);
-  const exists = store.value.campaigns.some((campaign) => normalizeCampaignName(campaign.name) === normalized);
-  if (exists) {
-    window.alert('Campaign name already exists');
-    return;
-  }
+  try {
+    const normalized = normalizeCampaignName(name);
+    const exists = store.value.campaigns.some(
+      (campaign) => normalizeCampaignName(campaign?.name) === normalized,
+    );
+    if (exists) {
+      window.alert('Campaign name already exists');
+      return;
+    }
 
-  const campaign = createCampaign(name);
-  store.value = {
-    ...store.value,
-    campaigns: [campaign, ...store.value.campaigns],
-    activeCampaignId: campaign.id,
-  };
-  await setCampaignStore(store.value);
+    const campaign = createCampaign(name);
+    store.value = {
+      ...store.value,
+      campaigns: [campaign, ...store.value.campaigns],
+      activeCampaignId: campaign.id,
+    };
+    await queuePersistStore();
+  } catch (error) {
+    console.error('Failed to create campaign', error);
+    window.alert('Failed to create campaign. Please refresh and try again.');
+  }
 }
 
 async function updateCampaign(campaignId: string, updater: (campaign: any) => any) {
@@ -82,7 +93,7 @@ async function updateCampaign(campaignId: string, updater: (campaign: any) => an
       campaign.id === campaignId ? updater(campaign) : campaign,
     ),
   };
-  await setCampaignStore(store.value);
+  await queuePersistStore();
 }
 
 async function updateDailyLimit(payload: { campaignId: string; value: number }) {
@@ -136,35 +147,11 @@ async function startCampaign(campaignId: string) {
     isRunning: true,
     campaignId,
   };
-  isPanelOpen.value = true;
 }
 
 async function stopCampaign() {
   await browser.runtime.sendMessage({ type: 'STOP_CAMPAIGN' } satisfies RuntimeMessage);
   await refresh();
-}
-
-function togglePanel() {
-  if (runState.value.isRunning) {
-    isPanelOpen.value = true;
-    return;
-  }
-
-  if (!isPanelOpen.value) {
-    const maxX = Math.max(0, window.innerWidth - 420);
-    const maxY = Math.max(0, window.innerHeight - 120);
-    const clampedX = Math.min(Math.max(0, store.value.panelPosition.x || 0), maxX);
-    const clampedY = Math.min(Math.max(0, store.value.panelPosition.y || 0), maxY);
-    if (clampedX !== store.value.panelPosition.x || clampedY !== store.value.panelPosition.y) {
-      store.value = {
-        ...store.value,
-        panelPosition: { x: clampedX, y: clampedY },
-      };
-      void setCampaignStore(store.value);
-    }
-  }
-
-  isPanelOpen.value = !isPanelOpen.value;
 }
 
 async function openProspect(prospect: Prospect) {
@@ -176,29 +163,20 @@ async function openProspect(prospect: Prospect) {
 
 onMounted(async () => {
   await refresh();
-  isPanelOpen.value = runState.value.isRunning;
   browser.storage.onChanged.addListener(async (changes, area) => {
     if (area !== 'local') return;
     if (changes['liCampaigns:v1'] || changes['liRunState:v1']) {
-      await refresh();
-      if (runState.value.isRunning) {
-        isPanelOpen.value = true;
+      if (isPersistingStore && changes['liCampaigns:v1']) {
+        return;
       }
+      await refresh();
     }
   });
 });
 </script>
 
 <template>
-  <FloatingLauncher
-    :x="store.floatingButtonPosition.x"
-    :y="store.floatingButtonPosition.y"
-    @click="togglePanel"
-    @move="moveLauncher"
-  />
-
   <CampaignPanel
-    v-if="shouldShowPanel"
     :campaigns="store.campaigns"
     :active-campaign-id="store.activeCampaignId"
     :is-running="runState.isRunning"
