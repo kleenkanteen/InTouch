@@ -8,10 +8,35 @@ import {
   updateRunState,
   updateProspectStatus,
 } from '@/lib/storage';
+import { getRandomDelayMs } from '@/lib/random-delay';
 import { getPstDateKey } from '@/lib/time-pst';
 import type { Campaign, Prospect } from '@/lib/types';
 
 let stopRequested = false;
+
+function waitFor(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function setRunNextAction(label: string | null, at: number | null): Promise<void> {
+  await updateRunState((state) => ({
+    ...state,
+    nextActionLabel: label,
+    nextActionAt: at,
+  }));
+}
+
+async function waitForBackgroundAction(label: string): Promise<void> {
+  const delayMs = getRandomDelayMs();
+  console.log('[InTouch][BG] runCampaign:wait:start', { label, delayMs });
+  try {
+    await setRunNextAction(label, Date.now() + delayMs);
+    await waitFor(delayMs);
+  } finally {
+    await setRunNextAction(null, null);
+    console.log('[InTouch][BG] runCampaign:wait:done', { label, delayMs });
+  }
+}
 
 function waitForTabComplete(tabId: number): Promise<void> {
   return new Promise((resolve) => {
@@ -36,7 +61,11 @@ function buildProspectQueue(campaign: Campaign): Prospect[] {
   return campaign.prospects.filter((prospect) => prospect.status === 'Prospect');
 }
 
-async function navigateTabToProfile(tabId: number, profileUrl: string): Promise<void> {
+async function navigateTabToProfile(
+  tabId: number,
+  profileUrl: string,
+  waitBeforeNavigate?: () => Promise<void>,
+): Promise<boolean> {
   let currentUrl = '';
   try {
     const tab = await browser.tabs.get(tabId);
@@ -47,11 +76,16 @@ async function navigateTabToProfile(tabId: number, profileUrl: string): Promise<
 
   if (currentUrl === profileUrl) {
     console.log('[InTouch][BG] runCampaign:navigate-skip-already-on-profile', { tabId, profileUrl });
-    return;
+    return false;
+  }
+
+  if (waitBeforeNavigate) {
+    await waitBeforeNavigate();
   }
 
   await browser.tabs.update(tabId, { url: profileUrl });
   await waitForTabComplete(tabId);
+  return true;
 }
 
 function isMissingContentScriptError(error: unknown): boolean {
@@ -62,6 +96,20 @@ function isMissingContentScriptError(error: unknown): boolean {
   );
 }
 
+function isInvalidProcessResponseError(error: unknown): boolean {
+  const message = (error as { message?: string })?.message || String(error);
+  return message.includes('Invalid PROCESS_CURRENT_PROFILE response');
+}
+
+function isProcessProfileResult(value: unknown): value is ProcessProfileResult {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as ProcessProfileResult;
+  return typeof candidate.status === 'string' && Array.isArray(candidate.timeline);
+}
+
 async function sendProcessMessage(
   tabId: number,
   message: Extract<RuntimeMessage, { type: 'PROCESS_CURRENT_PROFILE' }>,
@@ -69,11 +117,19 @@ async function sendProcessMessage(
   let lastError: unknown;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
-      const result = (await browser.tabs.sendMessage(tabId, message)) as ProcessProfileResult;
+      const result = (await browser.tabs.sendMessage(tabId, message)) as unknown;
+      if (!isProcessProfileResult(result)) {
+        throw new Error(
+          `Invalid PROCESS_CURRENT_PROFILE response (attempt ${attempt + 1}): ${String(result)}`,
+        );
+      }
       return result;
     } catch (error) {
       lastError = error;
-      if (!isMissingContentScriptError(error) || attempt === 19) {
+      if (
+        (!isMissingContentScriptError(error) && !isInvalidProcessResponseError(error)) ||
+        attempt === 19
+      ) {
         throw error;
       }
       await new Promise((resolve) => setTimeout(resolve, 750));
@@ -213,9 +269,15 @@ async function runCampaign(
         }
 
         console.log('[InTouch][BG] runCampaign:navigate', { tabId, normalizedUrl });
-        await navigateTabToProfile(tabId, normalizedUrl);
-        await new Promise((resolve) => setTimeout(resolve, 700));
-        console.log('[InTouch][BG] runCampaign:tab-complete', { tabId, normalizedUrl });
+        const didNavigate = await navigateTabToProfile(
+          tabId,
+          normalizedUrl,
+          async () => waitForBackgroundAction('Open next prospect profile'),
+        );
+        if (didNavigate) {
+          await waitFor(700);
+          console.log('[InTouch][BG] runCampaign:tab-complete', { tabId, normalizedUrl });
+        }
 
         const result = await sendProcessMessage(tabId, {
           type: 'PROCESS_CURRENT_PROFILE',
@@ -233,7 +295,12 @@ async function runCampaign(
           await setProspectStatus(campaignId, prospect.id, 'Invalid Profile', result.reason);
         }
 
+        if (result.status === 'Already connected') {
+          await setProspectStatus(campaignId, prospect.id, 'Already connected', result.reason);
+        }
+
         if (result.status === 'Sent Request') {
+          await setProspectStatus(campaignId, prospect.id, 'Sent Request', result.reason);
           console.log('[InTouch][BG] runCampaign:sent-request', { prospectId: prospect.id });
           const latest = await getRunState();
           await setRunState({

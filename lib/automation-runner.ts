@@ -1,5 +1,10 @@
 import { delayRandom } from './random-delay';
-import { getLinkedInElements, isLinkedInProfilePage } from './linkedin-selectors';
+import {
+  getLinkedInElements,
+  getLinkedInSelectorDebugSnapshot,
+  hasVisibleConnectionModalSendControls,
+  isLinkedInProfilePage,
+} from './linkedin-selectors';
 import type { ProcessProfileResult, RuntimeMessage } from './runtime-messages';
 
 function waitFor(ms: number): Promise<void> {
@@ -17,6 +22,55 @@ async function waitForActionControls(timeoutMs = 8_000, intervalMs = 250) {
     latest = getLinkedInElements();
   }
   return latest;
+}
+
+function clickActionTarget(target: HTMLElement): void {
+  target.scrollIntoView({ block: 'center', inline: 'center' });
+  target.click();
+}
+
+function logSelectorDebugSnapshot(
+  stage: string,
+  elements: ReturnType<typeof getLinkedInElements>,
+): void {
+  const snapshot = getLinkedInSelectorDebugSnapshot();
+  console.log('[InTouch][Runner] selector-debug-snapshot', {
+    stage,
+    href: location.href,
+    detected: {
+      hasPending: Boolean(elements.pendingButton),
+      hasMessage: Boolean(elements.messageButton),
+      hasConnect: Boolean(elements.connectButton),
+      hasMore: Boolean(elements.moreButton),
+      hasConnectInMenu: Boolean(elements.connectInMenuButton),
+      hasAddNote: Boolean(elements.addNoteButton),
+      hasNoteTextArea: Boolean(elements.noteTextArea),
+      hasSend: Boolean(elements.sendButton),
+    },
+    snapshot,
+  });
+}
+
+async function waitForSendCompletion(timeoutMs = 8_000, intervalMs = 250): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const latest = getLinkedInElements();
+    if (latest.pendingButton || latest.messageButton) {
+      return true;
+    }
+
+    if (!hasVisibleConnectionModalSendControls()) {
+      return true;
+    }
+
+    await waitFor(intervalMs);
+  }
+
+  const latest = getLinkedInElements();
+  return Boolean(
+    latest.pendingButton || latest.messageButton || !hasVisibleConnectionModalSendControls(),
+  );
 }
 
 export async function processCurrentProfile(
@@ -76,10 +130,11 @@ export async function processCurrentProfile(
     hasConnect: Boolean(elements.connectButton),
     hasMore: Boolean(elements.moreButton),
   });
+  logSelectorDebugSnapshot('initial', elements);
 
   if (!elements.connectButton && elements.moreButton) {
     await waitForAction('pre-click-more', 'Click More');
-    elements.moreButton.click();
+    clickActionTarget(elements.moreButton);
     record('clicked-more');
     await waitFor(900);
     elements = await waitForActionControls(4_000, 200);
@@ -87,26 +142,57 @@ export async function processCurrentProfile(
       hasConnectInMenu: Boolean(elements.connectInMenuButton),
       hasConnect: Boolean(elements.connectButton),
     });
+    logSelectorDebugSnapshot('after-more', elements);
   }
 
   const connectButton = elements.connectButton || elements.connectInMenuButton;
   if (!connectButton) {
+    await waitForAction('retry-connect-button-lookup', 'Retry Connect button lookup');
+    elements = await waitForActionControls(6_000, 250);
+    const retryConnectButton = elements.connectButton || elements.connectInMenuButton;
+    if (retryConnectButton) {
+      console.log('[InTouch][Runner] connect-button-found:retry', {
+        tag: retryConnectButton.tagName,
+        className: retryConnectButton.className,
+        text: (retryConnectButton.textContent || '').trim().slice(0, 120),
+      });
+    }
+    logSelectorDebugSnapshot('retry-connect-lookup', elements);
+  }
+
+  const resolvedConnectButton = elements.connectButton || elements.connectInMenuButton;
+  if (!resolvedConnectButton) {
+    logSelectorDebugSnapshot('no-connect-found', elements);
+    const hasConnectedState = Boolean(elements.pendingButton || elements.messageButton);
+    if (hasConnectedState) {
+      console.log('[InTouch][Runner] already-connected:no-connect-button', {
+        hasPending: Boolean(elements.pendingButton),
+        hasMessage: Boolean(elements.messageButton),
+      });
+      await setNextAction(null, null);
+      return {
+        status: 'Already connected',
+        reason: 'Pending or Message action is already visible on the profile',
+        timeline,
+      };
+    }
+
     console.warn('[InTouch][Runner] invalid-profile:no-connect-button');
     await setNextAction(null, null);
     return {
       status: 'Invalid Profile',
-      reason: 'Connect button not found on profile page (already connected)',
+      reason: 'Connect button not found after direct and More-menu checks',
       timeline,
     };
   }
 
   console.log('[InTouch][Runner] connect-button-found', {
-    tag: connectButton.tagName,
-    className: connectButton.className,
-    text: (connectButton.textContent || '').trim().slice(0, 120),
+    tag: resolvedConnectButton.tagName,
+    className: resolvedConnectButton.className,
+    text: (resolvedConnectButton.textContent || '').trim().slice(0, 120),
   });
   await waitForAction('pre-click-connect', 'Click Connect');
-  connectButton.click();
+  clickActionTarget(resolvedConnectButton);
   record('clicked-connect');
   console.log('[InTouch][Runner] clicked-connect');
   await waitFor(1200);
@@ -114,7 +200,7 @@ export async function processCurrentProfile(
   elements = getLinkedInElements();
   if (elements.addNoteButton) {
     await waitForAction('pre-click-add-note', 'Click Add a note');
-    elements.addNoteButton.click();
+    clickActionTarget(elements.addNoteButton);
     record('clicked-add-note');
     console.log('[InTouch][Runner] clicked-add-note');
     await waitFor(700);
@@ -133,6 +219,7 @@ export async function processCurrentProfile(
 
   elements = getLinkedInElements();
   if (!elements.sendButton) {
+    logSelectorDebugSnapshot('no-send-found', elements);
     console.warn('[InTouch][Runner] invalid-profile:no-send-button');
     await setNextAction(null, null);
     return {
@@ -154,9 +241,23 @@ export async function processCurrentProfile(
   }
 
   await waitForAction('pre-click-send', 'Click Send');
-  elements.sendButton.click();
+  clickActionTarget(elements.sendButton);
   record('clicked-send');
   console.log('[InTouch][Runner] clicked-send');
+  await waitForAction('post-click-send-delay', 'Wait for connection request confirmation');
+  const isSendConfirmed = await waitForSendCompletion(8_000, 250);
+  if (!isSendConfirmed) {
+    console.warn('[InTouch][Runner] send-not-confirmed');
+    await setNextAction(null, null);
+    return {
+      status: 'Invalid Profile',
+      reason: 'Connection request submission was not confirmed after clicking Send',
+      timeline,
+    };
+  }
+
+  record('send-confirmed');
+  console.log('[InTouch][Runner] send-confirmed');
   await setNextAction(null, null);
 
   return { status: 'Sent Request', timeline };
