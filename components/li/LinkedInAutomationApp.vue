@@ -34,6 +34,8 @@ const nextActionCountdown = ref<number | null>(null);
 let persistQueue: Promise<void> = Promise.resolve();
 let isPersistingStore = false;
 let countdownInterval: number | null = null;
+let runSyncInterval: number | null = null;
+let isRefreshing = false;
 
 function queuePersistStore(): Promise<void> {
   persistQueue = persistQueue.then(async () => {
@@ -49,16 +51,24 @@ function queuePersistStore(): Promise<void> {
 }
 
 async function refresh() {
-  store.value = await getCampaignStore();
-  runState.value = await getRunState();
-  console.log('[InTouch][UI] refresh', {
-    campaigns: store.value.campaigns.length,
-    activeCampaignId: store.value.activeCampaignId,
-    isRunning: runState.value.isRunning,
-    queue: runState.value.queue.length,
-    nextActionLabel: runState.value.nextActionLabel,
-    nextActionAt: runState.value.nextActionAt,
-  });
+  if (isRefreshing) {
+    return;
+  }
+  isRefreshing = true;
+  try {
+    store.value = await getCampaignStore();
+    runState.value = await getRunState();
+    console.log('[InTouch][UI] refresh', {
+      campaigns: store.value.campaigns.length,
+      activeCampaignId: store.value.activeCampaignId,
+      isRunning: runState.value.isRunning,
+      queue: runState.value.queue.length,
+      nextActionLabel: runState.value.nextActionLabel,
+      nextActionAt: runState.value.nextActionAt,
+    });
+  } finally {
+    isRefreshing = false;
+  }
 }
 
 async function movePanel(x: number, y: number) {
@@ -159,24 +169,10 @@ async function startCampaign(campaignId: string) {
     return;
   }
 
-  let runTabId: number | undefined;
-  try {
-    const opened = (await browser.runtime.sendMessage({
-      type: 'OPEN_PROFILE',
-      profileUrl: firstEligibleProspect.profileUrl,
-    } satisfies RuntimeMessage)) as { id?: number } | undefined;
-    if (typeof opened?.id === 'number') {
-      runTabId = opened.id;
-    }
-  } catch (error) {
-    console.error('[InTouch][UI] startCampaign:open-first-profile-error', error);
-  }
-
   const campaignSnapshot = JSON.parse(JSON.stringify(campaign)) as Campaign;
   const message: RuntimeMessage = {
     type: 'START_CAMPAIGN',
     campaignId,
-    tabId: runTabId,
     campaign: campaignSnapshot,
   };
 
@@ -224,6 +220,11 @@ onMounted(async () => {
       nextActionCountdown.value = null;
     }
   }, 250);
+  runSyncInterval = window.setInterval(() => {
+    if (runState.value.isRunning) {
+      void refresh();
+    }
+  }, 1500);
 
   browser.storage.onChanged.addListener(async (changes, area) => {
     if (area !== 'local') return;
@@ -240,6 +241,10 @@ onBeforeUnmount(() => {
   if (countdownInterval !== null) {
     window.clearInterval(countdownInterval);
     countdownInterval = null;
+  }
+  if (runSyncInterval !== null) {
+    window.clearInterval(runSyncInterval);
+    runSyncInterval = null;
   }
 });
 </script>

@@ -16,10 +16,17 @@ const className = computed(() => {
       return 'prospect';
   }
 });
+
+const displayStatus = computed(() => {
+  if (props.status === 'Sent Request') {
+    return 'Request Sent';
+  }
+  return props.status;
+});
 </script>
 
 <template>
-  <span class="status" :class="className">{{ status }}</span>
+  <span class="status" :class="className">{{ displayStatus }}</span>
 </template>
 
 <style scoped>

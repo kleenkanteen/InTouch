@@ -74,6 +74,8 @@ async function waitForSendCompletion(timeoutMs = 8_000, intervalMs = 250): Promi
 }
 
 export async function processCurrentProfile(
+  campaignId: string,
+  prospectId: string,
   note: string,
   dryRun = false,
 ): Promise<ProcessProfileResult> {
@@ -111,9 +113,34 @@ export async function processCurrentProfile(
     await setNextAction(null, null);
   };
 
+  const persistStatus = async (status: ProcessProfileResult['status'], reason?: string) => {
+    try {
+      await browser.runtime.sendMessage({
+        type: 'UPDATE_PROSPECT_STATUS',
+        campaignId,
+        prospectId,
+        status,
+        reason,
+      } satisfies RuntimeMessage);
+      console.log('[InTouch][Runner] status-persist-requested', {
+        campaignId,
+        prospectId,
+        status,
+      });
+    } catch (error) {
+      console.warn('[InTouch][Runner] status-persist-request-failed', {
+        campaignId,
+        prospectId,
+        status,
+        error,
+      });
+    }
+  };
+
   if (!isLinkedInProfilePage()) {
     console.warn('[InTouch][Runner] invalid-profile:not-on-profile-page', { href: location.href });
     await setNextAction(null, null);
+    await persistStatus('Invalid Profile', 'Not on /in/ profile page');
     return { status: 'Invalid Profile', reason: 'Not on /in/ profile page', timeline };
   }
 
@@ -131,6 +158,21 @@ export async function processCurrentProfile(
     hasMore: Boolean(elements.moreButton),
   });
   logSelectorDebugSnapshot('initial', elements);
+
+  if (!elements.connectButton && elements.pendingButton) {
+    const reason = 'Pending action is already visible on the profile';
+    console.log('[InTouch][Runner] pending-visible:no-connect', {
+      hasPending: Boolean(elements.pendingButton),
+      hasMessage: Boolean(elements.messageButton),
+    });
+    await setNextAction(null, null);
+    await persistStatus('Sent Request', reason);
+    return {
+      status: 'Sent Request',
+      reason,
+      timeline,
+    };
+  }
 
   if (!elements.connectButton && elements.moreButton) {
     await waitForAction('pre-click-more', 'Click More');
@@ -163,25 +205,31 @@ export async function processCurrentProfile(
   const resolvedConnectButton = elements.connectButton || elements.connectInMenuButton;
   if (!resolvedConnectButton) {
     logSelectorDebugSnapshot('no-connect-found', elements);
-    const hasConnectedState = Boolean(elements.pendingButton || elements.messageButton);
-    if (hasConnectedState) {
-      console.log('[InTouch][Runner] already-connected:no-connect-button', {
+    if (elements.pendingButton) {
+      const reason = 'Pending action is already visible on the profile';
+      console.log('[InTouch][Runner] pending-visible:no-connect-button', {
         hasPending: Boolean(elements.pendingButton),
         hasMessage: Boolean(elements.messageButton),
       });
       await setNextAction(null, null);
+      await persistStatus('Sent Request', reason);
       return {
-        status: 'Already connected',
-        reason: 'Pending or Message action is already visible on the profile',
+        status: 'Sent Request',
+        reason,
         timeline,
       };
     }
 
-    console.warn('[InTouch][Runner] invalid-profile:no-connect-button');
+    const reason = 'Connect and Pending actions are not visible on the profile';
+    console.log('[InTouch][Runner] already-connected:no-connect-no-pending', {
+      hasPending: Boolean(elements.pendingButton),
+      hasMessage: Boolean(elements.messageButton),
+    });
     await setNextAction(null, null);
+    await persistStatus('Already connected', reason);
     return {
-      status: 'Invalid Profile',
-      reason: 'Connect button not found after direct and More-menu checks',
+      status: 'Already connected',
+      reason,
       timeline,
     };
   }
@@ -219,23 +267,26 @@ export async function processCurrentProfile(
 
   elements = getLinkedInElements();
   if (!elements.sendButton) {
+    const reason = 'Send button not found after connect flow';
     logSelectorDebugSnapshot('no-send-found', elements);
     console.warn('[InTouch][Runner] invalid-profile:no-send-button');
     await setNextAction(null, null);
+    await persistStatus('Invalid Profile', reason);
     return {
       status: 'Invalid Profile',
-      reason: 'Send button not found after connect flow',
+      reason,
       timeline,
     };
   }
 
   if (dryRun) {
+    const reason = 'Dry run completed before send click';
     record('dry-run-before-send');
     console.log('[InTouch][Runner] dry-run-stop-before-send');
     await setNextAction(null, null);
     return {
       status: 'Sent Request',
-      reason: 'Dry run completed before send click',
+      reason,
       timeline,
     };
   }
@@ -247,11 +298,13 @@ export async function processCurrentProfile(
   await waitForAction('post-click-send-delay', 'Wait for connection request confirmation');
   const isSendConfirmed = await waitForSendCompletion(8_000, 250);
   if (!isSendConfirmed) {
+    const reason = 'Connection request submission was not confirmed after clicking Send';
     console.warn('[InTouch][Runner] send-not-confirmed');
     await setNextAction(null, null);
+    await persistStatus('Invalid Profile', reason);
     return {
       status: 'Invalid Profile',
-      reason: 'Connection request submission was not confirmed after clicking Send',
+      reason,
       timeline,
     };
   }
@@ -259,6 +312,7 @@ export async function processCurrentProfile(
   record('send-confirmed');
   console.log('[InTouch][Runner] send-confirmed');
   await setNextAction(null, null);
+  await persistStatus('Sent Request');
 
   return { status: 'Sent Request', timeline };
 }

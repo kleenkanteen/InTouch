@@ -155,6 +155,45 @@ async function setProspectStatus(
   }));
 }
 
+async function setProspectStatusWithVerify(
+  campaignId: string,
+  prospectId: string,
+  status: Prospect['status'],
+  reason?: string,
+  maxAttempts = 3,
+): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await setProspectStatus(campaignId, prospectId, status, reason);
+    const store = await getCampaignStore();
+    const campaign = store.campaigns.find((item) => item.id === campaignId);
+    const prospect = campaign?.prospects.find((item) => item.id === prospectId);
+    if (prospect?.status === status) {
+      console.log('[InTouch][BG] runCampaign:status-persisted', {
+        campaignId,
+        prospectId,
+        status,
+        attempt,
+      });
+      return;
+    }
+
+    console.warn('[InTouch][BG] runCampaign:status-persist-retry', {
+      campaignId,
+      prospectId,
+      status,
+      attempt,
+      persistedStatus: prospect?.status,
+    });
+    await waitFor(250);
+  }
+
+  console.error('[InTouch][BG] runCampaign:status-persist-failed', {
+    campaignId,
+    prospectId,
+    status,
+  });
+}
+
 async function syncCampaignSnapshot(campaign: Campaign): Promise<void> {
   await updateCampaignStore((store) => {
     const existing = store.campaigns.some((item) => item.id === campaign.id);
@@ -264,7 +303,12 @@ async function runCampaign(
       try {
         const normalizedUrl = normalizeProfileUrl(prospect.profileUrl);
         if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
-          await setProspectStatus(campaignId, prospect.id, 'Invalid Profile', 'Invalid profile URL');
+          await setProspectStatusWithVerify(
+            campaignId,
+            prospect.id,
+            'Invalid Profile',
+            'Invalid profile URL',
+          );
           continue;
         }
 
@@ -292,15 +336,20 @@ async function runCampaign(
         });
 
         if (result.status === 'Invalid Profile') {
-          await setProspectStatus(campaignId, prospect.id, 'Invalid Profile', result.reason);
+          await setProspectStatusWithVerify(campaignId, prospect.id, 'Invalid Profile', result.reason);
         }
 
         if (result.status === 'Already connected') {
-          await setProspectStatus(campaignId, prospect.id, 'Already connected', result.reason);
+          await setProspectStatusWithVerify(
+            campaignId,
+            prospect.id,
+            'Already connected',
+            result.reason,
+          );
         }
 
         if (result.status === 'Sent Request') {
-          await setProspectStatus(campaignId, prospect.id, 'Sent Request', result.reason);
+          await setProspectStatusWithVerify(campaignId, prospect.id, 'Sent Request', result.reason);
           console.log('[InTouch][BG] runCampaign:sent-request', { prospectId: prospect.id });
           const latest = await getRunState();
           await setRunState({
