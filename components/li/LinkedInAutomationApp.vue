@@ -35,7 +35,7 @@ let persistQueue: Promise<void> = Promise.resolve();
 let isPersistingStore = false;
 let countdownInterval: number | null = null;
 let runSyncInterval: number | null = null;
-let isRefreshing = false;
+let refreshInFlight: Promise<void> | null = null;
 
 function queuePersistStore(): Promise<void> {
   persistQueue = persistQueue.then(async () => {
@@ -50,12 +50,12 @@ function queuePersistStore(): Promise<void> {
   return persistQueue;
 }
 
-async function refresh() {
-  if (isRefreshing) {
-    return;
+function refresh(): Promise<void> {
+  if (refreshInFlight) {
+    return refreshInFlight;
   }
-  isRefreshing = true;
-  try {
+
+  refreshInFlight = (async () => {
     store.value = await getCampaignStore();
     runState.value = await getRunState();
     console.log('[InTouch][UI] refresh', {
@@ -66,9 +66,12 @@ async function refresh() {
       nextActionLabel: runState.value.nextActionLabel,
       nextActionAt: runState.value.nextActionAt,
     });
-  } finally {
-    isRefreshing = false;
-  }
+  })()
+    .finally(() => {
+      refreshInFlight = null;
+    });
+
+  return refreshInFlight;
 }
 
 async function movePanel(x: number, y: number) {
@@ -113,7 +116,30 @@ async function createNewCampaign(name: string) {
   }
 }
 
-async function updateCampaign(campaignId: string, updater: (campaign: any) => any) {
+async function renameCampaign(payload: { campaignId: string; name: string }) {
+  try {
+    const normalized = normalizeCampaignName(payload.name);
+    const exists = store.value.campaigns.some(
+      (campaign) =>
+        campaign.id !== payload.campaignId && normalizeCampaignName(campaign?.name) === normalized,
+    );
+    if (exists) {
+      window.alert('Campaign name already exists');
+      return;
+    }
+
+    await updateCampaign(payload.campaignId, (campaign) => ({
+      ...campaign,
+      name: payload.name.trim(),
+      updatedAt: new Date().toISOString(),
+    }));
+  } catch (error) {
+    console.error('Failed to rename campaign', error);
+    window.alert('Failed to rename campaign. Please refresh and try again.');
+  }
+}
+
+async function updateCampaign(campaignId: string, updater: (campaign: Campaign) => Campaign) {
   store.value = {
     ...store.value,
     campaigns: store.value.campaigns.map((campaign) =>
@@ -157,6 +183,8 @@ async function removeProspect(payload: { campaignId: string; prospectId: string 
 
 async function startCampaign(campaignId: string) {
   console.log('[InTouch][UI] startCampaign:click', { campaignId });
+  await persistQueue;
+  await refresh();
   const campaign = store.value.campaigns.find((item) => item.id === campaignId);
   if (!campaign) {
     window.alert('Unable to start campaign: campaign not found.');
@@ -261,6 +289,7 @@ onBeforeUnmount(() => {
     :y="store.panelPosition.y"
     @select-campaign="selectCampaign"
     @create-campaign="createNewCampaign"
+    @rename-campaign="renameCampaign"
     @update-daily-limit="updateDailyLimit"
     @update-connection-note="updateConnectionNote"
     @append-prospects="appendProspects"

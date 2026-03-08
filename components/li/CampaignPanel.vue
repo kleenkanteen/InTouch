@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import type { Campaign, Prospect } from '@/lib/types';
 import CampaignList from './CampaignList.vue';
 import CampaignTabs from './CampaignTabs.vue';
@@ -22,6 +22,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectCampaign: [campaignId: string];
   createCampaign: [name: string];
+  renameCampaign: [payload: { campaignId: string; name: string }];
   updateDailyLimit: [payload: { campaignId: string; value: number }];
   updateConnectionNote: [payload: { campaignId: string; value: string }];
   appendProspects: [payload: { campaignId: string; prospects: Prospect[] }];
@@ -90,6 +91,22 @@ onBeforeUnmount(() => {
 const activeCampaign = computed(() =>
   props.campaigns.find((campaign) => campaign.id === props.activeCampaignId) ?? null,
 );
+const campaignNameDraft = ref('');
+
+watch(
+  activeCampaign,
+  (campaign) => {
+    campaignNameDraft.value = campaign?.name ?? '';
+  },
+  { immediate: true },
+);
+
+function submitRename() {
+  const campaign = activeCampaign.value;
+  const trimmed = campaignNameDraft.value.trim();
+  if (!campaign || !trimmed || trimmed === campaign.name) return;
+  emit('renameCampaign', { campaignId: campaign.id, name: trimmed });
+}
 </script>
 
 <template>
@@ -108,6 +125,16 @@ const activeCampaign = computed(() =>
     <CreateCampaignForm @create="emit('createCampaign', $event)" />
 
     <div v-if="activeCampaign" class="campaign-area">
+      <div class="campaign-name-editor">
+        <input
+          v-model="campaignNameDraft"
+          type="text"
+          placeholder="Campaign name"
+          @keydown.enter.prevent="submitRename"
+        />
+        <button @click="submitRename">Rename</button>
+      </div>
+
       <CampaignTabs v-model="selectedTab" />
 
       <MessageTab
@@ -159,4 +186,26 @@ const activeCampaign = computed(() =>
 h3 { margin: 0 0 8px; font-size: 16px; color: #0f172a; }
 .drag-handle { cursor: move; user-select: none; }
 .campaign-area { margin-top: 10px; border-top: 1px solid #edf0f5; padding-top: 10px; }
+.campaign-name-editor {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.campaign-name-editor input {
+  min-width: 0;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 13px;
+}
+.campaign-name-editor button {
+  border: 0;
+  background: #0f172a;
+  color: white;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
 </style>

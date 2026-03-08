@@ -32,12 +32,7 @@ export default defineContentScript({
           dryRun: message.dryRun,
         });
 
-        void processCurrentProfile(
-          message.campaignId,
-          message.prospectId,
-          message.note,
-          Boolean(message.dryRun),
-        )
+        void processCurrentProfile(message.note, Boolean(message.dryRun))
           .then((result) => {
             sendResponse(result);
           })

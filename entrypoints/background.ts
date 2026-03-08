@@ -161,12 +161,14 @@ async function setProspectStatusWithVerify(
   status: Prospect['status'],
   reason?: string,
   maxAttempts = 3,
-): Promise<void> {
+): Promise<Prospect['status'] | null> {
+  let lastObservedStatus: Prospect['status'] | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     await setProspectStatus(campaignId, prospectId, status, reason);
     const store = await getCampaignStore();
     const campaign = store.campaigns.find((item) => item.id === campaignId);
     const prospect = campaign?.prospects.find((item) => item.id === prospectId);
+    lastObservedStatus = prospect?.status ?? null;
     if (prospect?.status === status) {
       console.log('[InTouch][BG] runCampaign:status-persisted', {
         campaignId,
@@ -174,7 +176,7 @@ async function setProspectStatusWithVerify(
         status,
         attempt,
       });
-      return;
+      return status;
     }
 
     console.warn('[InTouch][BG] runCampaign:status-persist-retry', {
@@ -192,19 +194,101 @@ async function setProspectStatusWithVerify(
     prospectId,
     status,
   });
+
+  return lastObservedStatus;
 }
 
-async function syncCampaignSnapshot(campaign: Campaign): Promise<void> {
-  await updateCampaignStore((store) => {
-    const existing = store.campaigns.some((item) => item.id === campaign.id);
-    return {
-      ...store,
-      campaigns: existing
-        ? store.campaigns.map((item) => (item.id === campaign.id ? campaign : item))
-        : [campaign, ...store.campaigns],
-      activeCampaignId: store.activeCampaignId ?? campaign.id,
-    };
+async function resolveCampaignForRun(
+  campaignId: string,
+  campaignSnapshot?: Campaign,
+): Promise<Campaign | null> {
+  const store = await getCampaignStore();
+  const fromStore = store.campaigns.find((item) => item.id === campaignId);
+  if (fromStore) {
+    return fromStore;
+  }
+
+  if (campaignSnapshot && campaignSnapshot.id === campaignId) {
+    await updateCampaignStore((current) => {
+      const exists = current.campaigns.some((item) => item.id === campaignId);
+      if (exists) {
+        return current;
+      }
+      return {
+        ...current,
+        campaigns: [campaignSnapshot, ...current.campaigns],
+        activeCampaignId: current.activeCampaignId ?? campaignId,
+      };
+    });
+    const refreshed = await getCampaignStore();
+    return refreshed.campaigns.find((item) => item.id === campaignId) ?? campaignSnapshot;
+  }
+
+  return null;
+}
+
+async function getPersistedProspectStatus(
+  campaignId: string,
+  prospectId: string,
+): Promise<Prospect['status'] | null> {
+  const store = await getCampaignStore();
+  const campaign = store.campaigns.find((item) => item.id === campaignId);
+  const prospect = campaign?.prospects.find((item) => item.id === prospectId);
+  return prospect?.status ?? null;
+}
+
+async function persistTerminalStatus(
+  campaignId: string,
+  prospectId: string,
+  status: Prospect['status'],
+  reason?: string,
+): Promise<Prospect['status'] | null> {
+  await setProspectStatusWithVerify(campaignId, prospectId, status, reason);
+  let finalStatus = await getPersistedProspectStatus(campaignId, prospectId);
+  if (finalStatus === 'Prospect') {
+    console.warn('[InTouch][BG] runCampaign:status-still-prospect-after-write', {
+      campaignId,
+      prospectId,
+      requestedStatus: status,
+    });
+    await setProspectStatusWithVerify(
+      campaignId,
+      prospectId,
+      'Invalid Profile',
+      'Status write recovery applied',
+    );
+    finalStatus = await getPersistedProspectStatus(campaignId, prospectId);
+  }
+
+  console.log('[InTouch][BG] runCampaign:status-final', {
+    campaignId,
+    prospectId,
+    requestedStatus: status,
+    finalStatus,
   });
+  return finalStatus;
+}
+
+async function applyProspectResult(
+  campaignId: string,
+  prospectId: string,
+  result: ProcessProfileResult,
+): Promise<Prospect['status'] | null> {
+  switch (result.status) {
+    case 'Sent Request':
+      return persistTerminalStatus(campaignId, prospectId, 'Sent Request', result.reason);
+    case 'Already connected':
+      return persistTerminalStatus(campaignId, prospectId, 'Already connected', result.reason);
+    case 'Invalid Profile':
+      return persistTerminalStatus(campaignId, prospectId, 'Invalid Profile', result.reason);
+    default:
+      return persistTerminalStatus(
+        campaignId,
+        prospectId,
+        'Invalid Profile',
+        `Unexpected result status: ${String((result as { status?: unknown }).status)}`,
+      );
+  }
 }
 
 async function runCampaign(
@@ -217,14 +301,7 @@ async function runCampaign(
   try {
     stopRequested = false;
 
-    if (campaignSnapshot && campaignSnapshot.id === campaignId) {
-      await syncCampaignSnapshot(campaignSnapshot);
-    }
-
-    const store = await getCampaignStore();
-    const campaign =
-      (campaignSnapshot && campaignSnapshot.id === campaignId ? campaignSnapshot : null) ??
-      store.campaigns.find((item) => item.id === campaignId);
+    const campaign = await resolveCampaignForRun(campaignId, campaignSnapshot);
     if (!campaign) {
       console.warn('[InTouch][BG] runCampaign:campaign-not-found', { campaignId });
       return;
@@ -273,6 +350,7 @@ async function runCampaign(
       console.log('[InTouch][BG] runCampaign:prospect-start', {
         prospectId: prospect.id,
         profileUrl: prospect.profileUrl,
+        initialStatus: prospect.status,
       });
 
       const runState = await getRunState();
@@ -303,12 +381,17 @@ async function runCampaign(
       try {
         const normalizedUrl = normalizeProfileUrl(prospect.profileUrl);
         if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
-          await setProspectStatusWithVerify(
+          const finalStatus = await persistTerminalStatus(
             campaignId,
             prospect.id,
             'Invalid Profile',
             'Invalid profile URL',
           );
+          console.log('[InTouch][BG] runCampaign:prospect-finished', {
+            prospectId: prospect.id,
+            resultStatus: 'Invalid Profile',
+            finalStatus,
+          });
           continue;
         }
 
@@ -335,22 +418,22 @@ async function runCampaign(
           result,
         });
 
-        if (result.status === 'Invalid Profile') {
-          await setProspectStatusWithVerify(campaignId, prospect.id, 'Invalid Profile', result.reason);
+        const finalStatus = await applyProspectResult(campaignId, prospect.id, result);
+        if (finalStatus === 'Prospect') {
+          console.warn('[InTouch][BG] runCampaign:prospect-ended-as-prospect', {
+            prospectId: prospect.id,
+            resultStatus: result.status,
+          });
         }
 
-        if (result.status === 'Already connected') {
-          await setProspectStatusWithVerify(
-            campaignId,
-            prospect.id,
-            'Already connected',
-            result.reason,
-          );
-        }
+        console.log('[InTouch][BG] runCampaign:prospect-finished', {
+          prospectId: prospect.id,
+          resultStatus: result.status,
+          finalStatus,
+        });
 
-        if (result.status === 'Sent Request') {
-          await setProspectStatusWithVerify(campaignId, prospect.id, 'Sent Request', result.reason);
-          console.log('[InTouch][BG] runCampaign:sent-request', { prospectId: prospect.id });
+        if (finalStatus === 'Sent Request') {
+          console.log('[InTouch][BG] runCampaign:sent-request', { prospectId: prospect.id, finalStatus });
           const latest = await getRunState();
           await setRunState({
             ...latest,
@@ -361,9 +444,21 @@ async function runCampaign(
           });
         }
       } catch (error) {
+        const errorMessage = (error as { message?: string })?.message || String(error);
         console.error('[InTouch][BG] runCampaign:process-error', {
           prospectId: prospect.id,
           error,
+        });
+        const finalStatus = await persistTerminalStatus(
+          campaignId,
+          prospect.id,
+          'Invalid Profile',
+          `Automation error: ${errorMessage}`,
+        );
+        console.log('[InTouch][BG] runCampaign:prospect-finished', {
+          prospectId: prospect.id,
+          resultStatus: 'Invalid Profile',
+          finalStatus,
         });
       }
     }
